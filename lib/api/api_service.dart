@@ -3,9 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  // Nota: 10.0.2.2 es el localhost equivalente para el emulador de Android.
-  // Si corres de forma nativa en Windows, usar 127.0.0.1.
-  static const String baseUrl = 'http://10.0.2.2:8000';
+  static const String baseUrl = 'http://jvqy3e0tujy89or5hhad84xe.67.205.132.14.sslip.io';
 
   static Future<Map<String, dynamic>> registerConductor(Map<String, dynamic> data) async {
     final response = await http.post(
