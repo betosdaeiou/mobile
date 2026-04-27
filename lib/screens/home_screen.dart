@@ -17,7 +17,7 @@ class HomeScreen extends StatefulWidget {
   _HomeScreenState createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late Future<List<dynamic>> _vehiculosFuture;
   LatLng? _currentLocation;
   final MapController _mapController = MapController();
@@ -26,48 +26,151 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _vehiculosFuture = ApiService.getVehiculos();
     _initMap();
   }
 
-  Future<void> _initMap() async {
-    bool serviceEnabled;
-    LocationPermission permission;
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
-    // Verificar servicios de ubicación
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Reintenta obtener ubicación cuando el usuario regresa de Configuración
+    if (state == AppLifecycleState.resumed && _currentLocation == null) {
+      _initMap();
+    }
+  }
+
+  Future<void> _initMap() async {
+    if (!mounted) return;
+    setState(() => _isLoadingGps = true);
+
+    // 1. Verificar si el servicio de GPS está activo
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Servicios de ubicación deshabilitados')));
+      if (!mounted) return;
       setState(() => _isLoadingGps = false);
+      _showLocationServiceDialog();
       return;
     }
 
-    permission = await Geolocator.checkPermission();
+    // 2. Verificar / solicitar permiso
+    LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) {
-        setState(() => _isLoadingGps = false);
+        if (mounted) setState(() => _isLoadingGps = false);
         return;
       }
     }
 
     if (permission == LocationPermission.deniedForever) {
+      if (!mounted) return;
       setState(() => _isLoadingGps = false);
+      _showPermissionDeniedDialog();
       return;
     }
 
-    // Obtener la posición
-    final position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-    setState(() {
-      _currentLocation = LatLng(position.latitude, position.longitude);
-      _isLoadingGps = false;
-    });
-
-    // Centrar mapa
-    if (_currentLocation != null) {
+    // 3. Obtener la posición
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 15),
+      );
+      if (!mounted) return;
+      setState(() {
+        _currentLocation = LatLng(position.latitude, position.longitude);
+        _isLoadingGps = false;
+      });
       _mapController.move(_currentLocation!, 15.0);
+    } catch (e) {
+      if (mounted) setState(() => _isLoadingGps = false);
     }
   }
+
+  void _showLocationServiceDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.location_off, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('GPS Desactivado'),
+          ],
+        ),
+        content: const Text(
+          'Los servicios de ubicación están deshabilitados.\n\n'
+          'Para poder usar el mapa y reportar incidentes, activa el GPS en la configuración de tu dispositivo.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.settings, size: 16),
+            label: const Text('Abrir Ajustes'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.indigo,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () {
+              Navigator.pop(ctx);
+              Geolocator.openLocationSettings();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showPermissionDeniedDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.location_disabled, color: Colors.red),
+            SizedBox(width: 8),
+            Text('Permiso Denegado'),
+          ],
+        ),
+        content: const Text(
+          'El permiso de ubicación fue denegado permanentemente.\n\n'
+          'Ve a Configuración → Aplicaciones → esta app → Permisos → Ubicación y actívalo.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.settings, size: 16),
+            label: const Text('Abrir Ajustes'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.indigo,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () {
+              Navigator.pop(ctx);
+              Geolocator.openAppSettings();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
 
   void _refreshList() {
     setState(() {
