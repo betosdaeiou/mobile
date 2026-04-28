@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api/api_service.dart';
 import '../services/fcm_service.dart';
+import 'chat_screen.dart';
 
 class EstadoIncidenteScreen extends StatefulWidget {
   final Map<String, dynamic> incidente;
@@ -344,6 +345,27 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
           icon: const Icon(Icons.close),
           onPressed: () => Navigator.pop(context, true),
         ),
+        actions: [
+          if (_incidente['taller_id'] != null && !isCancelado)
+            IconButton(
+              icon: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2196F3).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.chat_bubble_outline_rounded, color: Color(0xFF64B5F6), size: 20),
+              ),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ChatScreen(incidenteId: _incidente['id']),
+                  ),
+                );
+              },
+            ),
+        ],
       ),
       body: SingleChildScrollView(
         physics: const BouncingScrollPhysics(),

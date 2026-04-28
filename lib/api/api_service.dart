@@ -436,4 +436,38 @@ class ApiService {
       throw Exception(jsonDecode(response.body)['detail'] ?? 'Error al reintentar análisis');
     }
   }
+
+  // ─── CHAT ───
+
+  static Future<List<Map<String, dynamic>>> getChatMessages(int incidenteId) async {
+    final token = await _getToken();
+    final response = await http.get(
+      Uri.parse('$baseUrl/incidentes/$incidenteId/chat'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+
+    if (response.statusCode == 200) {
+      return List<Map<String, dynamic>>.from(jsonDecode(response.body));
+    } else {
+      throw Exception(jsonDecode(response.body)['detail'] ?? 'Error al obtener mensajes');
+    }
+  }
+
+  static Future<Map<String, dynamic>> sendChatMessage(int incidenteId, String contenido) async {
+    final token = await _getToken();
+    final response = await http.post(
+      Uri.parse('$baseUrl/incidentes/$incidenteId/chat'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'contenido': contenido}),
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception(jsonDecode(response.body)['detail'] ?? 'Error al enviar mensaje');
+    }
+  }
 }
