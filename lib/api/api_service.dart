@@ -148,15 +148,22 @@ class ApiService {
     }
   }
 
-  static Future<List<dynamic>> getTalleresDisponibles(double? lat, double? lng) async {
+  static Future<List<dynamic>> getTalleresDisponibles(double? lat, double? lng, [int? incidenteId]) async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('token');
     
     if (token == null) throw Exception('No autenticado');
 
     String url = '$baseUrl/incidentes/talleres-disponibles';
+    List<String> queryParams = [];
     if (lat != null && lng != null) {
-      url += '?lat=$lat&lng=$lng';
+      queryParams.add('lat=$lat&lng=$lng');
+    }
+    if (incidenteId != null) {
+      queryParams.add('incidente_id=$incidenteId');
+    }
+    if (queryParams.isNotEmpty) {
+      url += '?${queryParams.join('&')}';
     }
 
     final response = await http.get(

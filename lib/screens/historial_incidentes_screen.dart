@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../api/api_service.dart';
+import '../services/fcm_service.dart';
 import 'estado_incidente_screen.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -18,6 +20,7 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
   String _filtroEstado = 'Todos';
   final Map<int, TextEditingController> _reintentarControllers = {};
   bool _isReintentando = false;
+  late StreamSubscription<String> _fcmSubscription;
 
   final List<String> _estados = [
     'Todos',
@@ -32,6 +35,16 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
   void initState() {
     super.initState();
     _incidentesFuture = ApiService.getMisIncidentes();
+    
+    _fcmSubscription = FcmService.onRefresh.listen((_) {
+      _refresh();
+    });
+  }
+
+  @override
+  void dispose() {
+    _fcmSubscription.cancel();
+    super.dispose();
   }
 
   void _refresh() {

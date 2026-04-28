@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api/api_service.dart';
+import '../services/fcm_service.dart';
 
 class EstadoIncidenteScreen extends StatefulWidget {
   final Map<String, dynamic> incidente;
@@ -35,6 +37,7 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
   ];
 
   bool _isPagando = false;
+  late StreamSubscription<String> _fcmSubscription;
 
   @override
   void initState() {
@@ -45,10 +48,15 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
     _cargarTalleres();
+
+    _fcmSubscription = FcmService.onRefresh.listen((_) {
+      _recargarIncidente();
+    });
   }
 
   @override
   void dispose() {
+    _fcmSubscription.cancel();
     _pulseController.dispose();
     super.dispose();
   }
@@ -58,6 +66,7 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
       final talleres = await ApiService.getTalleresDisponibles(
         widget.gpsReal?.latitude,
         widget.gpsReal?.longitude,
+        widget.incidente['id'],
       );
       if (mounted) {
         setState(() {
@@ -183,8 +192,8 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
         });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Pago registrado exitosamente. Servicio finalizado.'),
-            backgroundColor: Color(0xFF43A047),
+            content: Text('Pago registrado. Esperando confirmación del taller.'),
+            backgroundColor: Color(0xFFFB8C00),
           ),
         );
       }
@@ -357,7 +366,10 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
             if (tieneTaller && !isCancelado) _buildTallerAsignado(tallerAsignado),
 
             // ─── SECCIÓN DE PAGO ───
-            if (estadoActual == 'Resuelto') _buildSeccionPago(),
+            if (estadoActual == 'Resuelto' && !_tienePagoPendiente()) _buildSeccionPago(),
+
+            // ─── PAGO PENDIENTE CONFIRMACIÓN ───
+            if (estadoActual == 'Resuelto' && _tienePagoPendiente()) _buildPagoPendienteBanner(),
 
             if (estadoActual == 'Pagado') _buildPagadoBanner(),
 
@@ -863,13 +875,26 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
         final capmax = taller['Capmax'] ?? 1;
         final distancia = taller['distancia_km'];
         final porcentaje = capmax > 0 ? cap / capmax : 0.0;
+        final recomendadoIa = taller['recomendado_ia'] ?? false;
 
         return Container(
           margin: const EdgeInsets.only(bottom: 12),
           decoration: BoxDecoration(
             color: const Color(0xFF1A2236),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withOpacity(0.06)),
+            border: Border.all(
+                color: recomendadoIa 
+                    ? const Color(0xFF7986CB).withOpacity(0.5) 
+                    : Colors.white.withOpacity(0.06),
+                width: recomendadoIa ? 1.5 : 1.0,
+            ),
+            boxShadow: recomendadoIa ? [
+              BoxShadow(
+                color: const Color(0xFF3F51B5).withOpacity(0.15),
+                blurRadius: 10,
+                spreadRadius: 1,
+              )
+            ] : [],
           ),
           child: Material(
             color: Colors.transparent,
@@ -883,6 +908,32 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (recomendadoIa)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3F51B5).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF5C6BC0).withOpacity(0.4)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Icon(Icons.psychology, color: Color(0xFF9FA8DA), size: 14),
+                            SizedBox(width: 6),
+                            Text(
+                              '✨ RECOMENDADO POR IA',
+                              style: TextStyle(
+                                color: Color(0xFFC5CAE9),
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     Row(
                       children: [
                         Container(
@@ -1317,6 +1368,58 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
               padding: EdgeInsets.only(top: 20),
               child: CircularProgressIndicator(color: Color(0xFF42A5F5)),
             ),
+        ],
+      ),
+    );
+  }
+
+  bool _tienePagoPendiente() {
+    final pagos = _incidente['pagos'] as List<dynamic>? ?? [];
+    return pagos.any((p) => p['estado'] == 'Pendiente Confirmación' && p['metodo'] == 'Directo');
+  }
+
+  Widget _buildPagoPendienteBanner() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFFF57F17).withOpacity(0.15),
+            const Color(0xFFF57F17).withOpacity(0.05),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFFB8C00).withOpacity(0.5), width: 1.5),
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFB8C00).withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.hourglass_top_rounded, color: Color(0xFFFFA726), size: 40),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            'ESPERANDO CONFIRMACIÓN',
+            style: TextStyle(
+              color: Color(0xFFFFCC80),
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              letterSpacing: 1.2,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Tu pago en efectivo ha sido registrado. El taller debe confirmar que recibió el dinero para finalizar el servicio.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+          ),
         ],
       ),
     );

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:mobile_app/api/api_service.dart';
@@ -12,6 +13,10 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 class FcmService {
   static final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
   static final FlutterLocalNotificationsPlugin _flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+  // Stream para notificar a la UI que debe recargar datos
+  static final StreamController<String> _refreshController = StreamController<String>.broadcast();
+  static Stream<String> get onRefresh => _refreshController.stream;
 
   static Future<void> initialize() async {
     // 1. Pedir permisos para iOS/Android 13+
@@ -73,6 +78,8 @@ class FcmService {
             ),
           ),
         );
+        // Emitir evento para recargar la interfaz
+        _refreshController.add('refresh');
       }
     });
 
