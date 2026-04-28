@@ -440,7 +440,10 @@ class ApiService {
   // ─── CHAT ───
 
   static Future<List<Map<String, dynamic>>> getChatMessages(int incidenteId) async {
-    final token = await _getToken();
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('token');
+    if (token == null) throw Exception('No autenticado');
+
     final response = await http.get(
       Uri.parse('$baseUrl/incidentes/$incidenteId/chat'),
       headers: {'Authorization': 'Bearer $token'},
@@ -454,7 +457,10 @@ class ApiService {
   }
 
   static Future<Map<String, dynamic>> sendChatMessage(int incidenteId, String contenido) async {
-    final token = await _getToken();
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('token');
+    if (token == null) throw Exception('No autenticado');
+
     final response = await http.post(
       Uri.parse('$baseUrl/incidentes/$incidenteId/chat'),
       headers: {
