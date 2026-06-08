@@ -1,5 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../api/api_service.dart';
+import '../services/connectivity_service.dart';
+import '../db/database_helper.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({Key? key}) : super(key: key);
@@ -13,6 +17,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _loading = true;
   bool _saving = false;
   String? _error;
+  bool _isOffline = false;
+  bool _loadedFromCache = false;
+  int _pendingProfileUpdates = 0;
 
   // Controladores de cuenta
   final _correoController = TextEditingController();
@@ -31,6 +38,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void initState() {
     super.initState();
     _loadProfile();
+    _loadPendingCount();
   }
 
   @override
@@ -43,24 +51,63 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.dispose();
   }
 
+  Future<void> _loadPendingCount() async {
+    final count = await DatabaseHelper.instance.countUnsyncedProfileUpdates();
+    if (mounted) setState(() => _pendingProfileUpdates = count);
+  }
+
   Future<void> _loadProfile() async {
     setState(() {
       _loading = true;
       _error = null;
+      _loadedFromCache = false;
     });
+
+    // Verificar conectividad
+    final connectivity = ConnectivityService();
+    await connectivity.checkInitialConnection();
+    _isOffline = !connectivity.isOnline;
+
     try {
       final profile = await ApiService.getProfile();
+      // Cachear el perfil para uso offline
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('cached_profile', jsonEncode(profile));
+
       setState(() {
         _profile = profile;
+        _isOffline = false;
         _populateFields();
         _loading = false;
       });
     } catch (e) {
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _loading = false;
-      });
+      // Intentar cargar del cache
+      final cached = await _loadCachedProfile();
+      if (cached != null) {
+        setState(() {
+          _profile = cached;
+          _loadedFromCache = true;
+          _isOffline = true;
+          _populateFields();
+          _loading = false;
+        });
+      } else {
+        setState(() {
+          _error = e.toString().replaceAll('Exception: ', '');
+          _loading = false;
+          _isOffline = true;
+        });
+      }
     }
+  }
+
+  Future<Map<String, dynamic>?> _loadCachedProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString('cached_profile');
+    if (cached != null) {
+      return Map<String, dynamic>.from(jsonDecode(cached));
+    }
+    return null;
   }
 
   void _populateFields() {
@@ -113,59 +160,148 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Map<String, dynamic> _buildPayload() {
+    final payload = <String, dynamic>{};
+
+    if (_correoController.text.isNotEmpty &&
+        _correoController.text != _profile!['Correo']) {
+      payload['Correo'] = _correoController.text.trim();
+    }
+    if (_passwordController.text.isNotEmpty) {
+      payload['Password'] = _passwordController.text;
+    }
+    if (_ciController.text.isNotEmpty) {
+      payload['conductor_ci'] = _ciController.text.trim();
+    }
+    if (_nombreController.text.isNotEmpty) {
+      payload['conductor_nombre'] = _nombreController.text.trim();
+    }
+    if (_apellidosController.text.isNotEmpty) {
+      payload['conductor_apellidos'] = _apellidosController.text.trim();
+    }
+    if (_fechaNac != null) {
+      payload['conductor_fechanac'] =
+          '${_fechaNac!.year}-${_fechaNac!.month.toString().padLeft(2, '0')}-${_fechaNac!.day.toString().padLeft(2, '0')}';
+    }
+    return payload;
+  }
+
+  /// Aplica los cambios al perfil cacheado localmente
+  void _applyChangesLocally(Map<String, dynamic> payload) {
+    if (_profile == null) return;
+
+    if (payload.containsKey('Correo')) {
+      _profile!['Correo'] = payload['Correo'];
+    }
+    final conductor = _profile!['conductor'];
+    if (conductor != null) {
+      if (payload.containsKey('conductor_ci')) {
+        conductor['CI'] = payload['conductor_ci'];
+      }
+      if (payload.containsKey('conductor_nombre')) {
+        conductor['Nombre'] = payload['conductor_nombre'];
+      }
+      if (payload.containsKey('conductor_apellidos')) {
+        conductor['Apellidos'] = payload['conductor_apellidos'];
+      }
+      if (payload.containsKey('conductor_fechanac')) {
+        conductor['Fechanac'] = payload['conductor_fechanac'];
+      }
+    }
+  }
+
   Future<void> _saveProfile() async {
     setState(() {
       _saving = true;
       _error = null;
     });
 
+    final payload = _buildPayload();
+
+    // Verificar conectividad
+    final connectivity = ConnectivityService();
+    await connectivity.checkInitialConnection();
+
+    if (connectivity.isOnline) {
+      try {
+        final updatedProfile = await ApiService.updateProfile(payload);
+
+        // Actualizar cache
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('cached_profile', jsonEncode(updatedProfile));
+
+        setState(() {
+          _profile = updatedProfile;
+          _populateFields();
+          _passwordController.clear();
+          _saving = false;
+          _isOffline = false;
+          _loadedFromCache = false;
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.white, size: 20),
+                  SizedBox(width: 8),
+                  Text('Perfil actualizado correctamente'),
+                ],
+              ),
+              backgroundColor: const Color(0xFF059669),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              margin: const EdgeInsets.all(16),
+            ),
+          );
+        }
+      } catch (e) {
+        // Si falla la red, guardar offline
+        await _saveProfileOffline(payload);
+      }
+    } else {
+      await _saveProfileOffline(payload);
+    }
+  }
+
+  Future<void> _saveProfileOffline(Map<String, dynamic> payload) async {
     try {
-      final payload = <String, dynamic>{};
+      // Guardar en la cola de sincronización
+      await DatabaseHelper.instance.createPendingProfileUpdate(
+        jsonEncode(payload),
+      );
 
-      // Datos de cuenta
-      if (_correoController.text.isNotEmpty &&
-          _correoController.text != _profile!['Correo']) {
-        payload['Correo'] = _correoController.text.trim();
-      }
-      if (_passwordController.text.isNotEmpty) {
-        payload['Password'] = _passwordController.text;
-      }
-
-      // Datos de conductor
-      if (_ciController.text.isNotEmpty) {
-        payload['conductor_ci'] = _ciController.text.trim();
-      }
-      if (_nombreController.text.isNotEmpty) {
-        payload['conductor_nombre'] = _nombreController.text.trim();
-      }
-      if (_apellidosController.text.isNotEmpty) {
-        payload['conductor_apellidos'] = _apellidosController.text.trim();
-      }
-      if (_fechaNac != null) {
-        payload['conductor_fechanac'] =
-            '${_fechaNac!.year}-${_fechaNac!.month.toString().padLeft(2, '0')}-${_fechaNac!.day.toString().padLeft(2, '0')}';
-      }
-
-      final updatedProfile = await ApiService.updateProfile(payload);
+      // Aplicar cambios localmente al cache
+      _applyChangesLocally(payload);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('cached_profile', jsonEncode(_profile));
 
       setState(() {
-        _profile = updatedProfile;
         _populateFields();
         _passwordController.clear();
         _saving = false;
       });
 
+      await _loadPendingCount();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.white, size: 20),
-                SizedBox(width: 8),
-                Text('Perfil actualizado correctamente'),
+            content: Row(
+              children: const [
+                Icon(Icons.cloud_off, color: Colors.white, size: 20),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Sin conexión. Cambios guardados localmente.\nSe sincronizarán al recuperar internet.',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                ),
               ],
             ),
-            backgroundColor: const Color(0xFF059669),
+            duration: const Duration(seconds: 5),
+            backgroundColor: Colors.orange.shade700,
             behavior: SnackBarBehavior.floating,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             margin: const EdgeInsets.all(16),
@@ -175,7 +311,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (e) {
       setState(() {
         _saving = false;
-        _error = e.toString().replaceAll('Exception: ', '');
+        _error = 'Error al guardar localmente: ${e.toString()}';
       });
     }
   }
@@ -230,6 +366,58 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     padding: const EdgeInsets.all(16),
                     child: Column(
                       children: [
+                        // ─── OFFLINE BANNER ───
+                        if (_isOffline || _loadedFromCache)
+                          Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(bottom: 16),
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [Colors.orange.shade700, Colors.orange.shade600],
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                              boxShadow: [
+                                BoxShadow(color: Colors.orange.withOpacity(0.3), blurRadius: 8),
+                              ],
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.cloud_off, color: Colors.white, size: 22),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      const Text(
+                                        'Modo Offline',
+                                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14),
+                                      ),
+                                      Text(
+                                        _pendingProfileUpdates > 0
+                                            ? 'Datos desde caché. $_pendingProfileUpdates cambio(s) pendiente(s).'
+                                            : 'Datos cargados desde caché local.',
+                                        style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (_pendingProfileUpdates > 0)
+                                  Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(
+                                      '$_pendingProfileUpdates',
+                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+
                         // Avatar + Info Header
                         _buildProfileHeader(),
                         const SizedBox(height: 20),
@@ -359,17 +547,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                       color: Colors.white,
                                     ),
                                   )
-                                : const Icon(Icons.save_rounded),
+                                : Icon(_isOffline ? Icons.save_outlined : Icons.save_rounded),
                             label: Text(
-                              _saving ? 'Guardando...' : 'Guardar Cambios',
+                              _saving
+                                  ? 'Guardando...'
+                                  : _isOffline
+                                      ? 'Guardar Localmente'
+                                      : 'Guardar Cambios',
                               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                             ),
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF4F46E5),
+                              backgroundColor: _isOffline ? Colors.orange.shade700 : const Color(0xFF4F46E5),
                               foregroundColor: Colors.white,
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                               elevation: 4,
-                              shadowColor: const Color(0xFF4F46E5).withOpacity(0.4),
+                              shadowColor: (_isOffline ? Colors.orange : const Color(0xFF4F46E5)).withOpacity(0.4),
                             ),
                           ),
                         ),
@@ -461,11 +653,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 Container(
                   width: 8,
                   height: 8,
-                  decoration: const BoxDecoration(color: Color(0xFF34D399), shape: BoxShape.circle),
+                  decoration: BoxDecoration(
+                    color: _isOffline ? Colors.orange : const Color(0xFF34D399),
+                    shape: BoxShape.circle,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  rol,
+                  _isOffline ? '$rol (Offline)' : rol,
                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
                 ),
               ],

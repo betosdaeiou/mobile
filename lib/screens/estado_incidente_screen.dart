@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../api/api_service.dart';
 import '../services/fcm_service.dart';
 import 'chat_screen.dart';
+import '../config/theme.dart';
 
 class EstadoIncidenteScreen extends StatefulWidget {
   final Map<String, dynamic> incidente;
@@ -334,13 +335,13 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
     final bool puedeCancelar = !isCancelado && (estadoActual == 'Reportado' || estadoActual == 'Asignado');
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F1523),
+      backgroundColor: AppTheme.gray50,
       appBar: AppBar(
         title: const Text('Estado de Solicitud',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        backgroundColor: Colors.transparent,
+            style: TextStyle(color: AppTheme.gray900, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
+        backgroundColor: Colors.white,
         elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
+        iconTheme: const IconThemeData(color: AppTheme.gray900),
         leading: IconButton(
           icon: const Icon(Icons.close),
           onPressed: () => Navigator.pop(context, true),
@@ -1263,6 +1264,20 @@ class _EstadoIncidenteScreenState extends State<EstadoIncidenteScreen>
                          style: const TextStyle(color: Color(0xFF42A5F5), fontWeight: FontWeight.bold, fontSize: 18)),
                   ],
                 ),
+                if (cot['tiempo_estimado'] != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4.0),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.timer, color: Colors.white54, size: 14),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Tiempo estimado: ${cot['tiempo_estimado']}',
+                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  ),
                 if (servicios.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Wrap(

@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import '../api/api_service.dart';
 import 'home_screen.dart';
+import 'mechanic_home_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'register_screen.dart';
 import '../services/fcm_service.dart';
+import '../config/theme.dart';
 
 class LoginScreen extends StatefulWidget {
   @override
@@ -22,11 +25,21 @@ class _LoginScreenState extends State<LoginScreen> {
       await ApiService.login(_emailCtl.text, _pwdCtl.text);
       await FcmService.updateTokenOnServer();
       
+      final prefs = await SharedPreferences.getInstance();
+      final role = prefs.getString('role') ?? 'Conductor';
+
       if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (context) => HomeScreen()),
-        );
+        if (role == 'Mecanico') {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => MechanicHomeScreen()),
+          );
+        } else {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => HomeScreen()),
+          );
+        }
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -40,91 +53,93 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.indigo[900], // Premium dark look
+      backgroundColor: AppTheme.gray50,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(horizontal: 32.0),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Icon(Icons.directions_car, size: 80, color: Colors.blueAccent),
-                SizedBox(height: 24),
-                Text(
-                  'Portal Conductor',
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: const BoxDecoration(
+                    color: AppTheme.blue50,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.directions_car, size: 40, color: AppTheme.blue600),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'Bienvenido',
+                  textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: Colors.white,
                     fontSize: 28,
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.gray900,
+                    letterSpacing: -0.5,
                   ),
                 ),
-                SizedBox(height: 40),
+                const SizedBox(height: 8),
+                const Text(
+                  'Ingresa tus credenciales para continuar',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: AppTheme.gray500,
+                  ),
+                ),
+                const SizedBox(height: 40),
                 TextField(
                   controller: _emailCtl,
                   keyboardType: TextInputType.emailAddress,
-                  style: TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
+                  decoration: const InputDecoration(
                     hintText: 'Correo electrónico',
-                    hintStyle: TextStyle(color: Colors.grey[400]),
-                    filled: true,
-                    fillColor: Colors.black26,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    prefixIcon: Icon(Icons.email, color: Colors.blueAccent),
+                    prefixIcon: Icon(Icons.email_outlined, color: AppTheme.gray400),
                   ),
                 ),
-                SizedBox(height: 16),
+                const SizedBox(height: 16),
                 TextField(
                   controller: _pwdCtl,
                   obscureText: true,
-                  style: TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
+                  decoration: const InputDecoration(
                     hintText: 'Contraseña',
-                    hintStyle: TextStyle(color: Colors.grey[400]),
-                    filled: true,
-                    fillColor: Colors.black26,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    prefixIcon: Icon(Icons.lock, color: Colors.blueAccent),
+                    prefixIcon: Icon(Icons.lock_outline, color: AppTheme.gray400),
                   ),
                 ),
-                SizedBox(height: 32),
+                const SizedBox(height: 32),
                 _isLoading
-                    ? CircularProgressIndicator(color: Colors.blueAccent)
-                    : SizedBox(
-                        width: double.infinity,
-                        height: 50,
-                        child: ElevatedButton(
-                          onPressed: _login,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.blueAccent,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          child: Text(
-                            'Iniciar Sesión',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
-                          ),
-                        ),
+                    ? const Center(child: CircularProgressIndicator())
+                    : ElevatedButton(
+                        onPressed: _login,
+                        child: const Text('Iniciar Sesión'),
                       ),
-                SizedBox(height: 24),
-                TextButton(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (context) => RegisterScreen()),
-                    );
-                  },
-                  child: Text(
-                    '¿No tienes cuenta? Registrate',
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                )
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text(
+                      '¿No tienes cuenta? ',
+                      style: TextStyle(color: AppTheme.gray500),
+                    ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(0, 0),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (context) => RegisterScreen()),
+                        );
+                      },
+                      child: const Text('Regístrate'),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),

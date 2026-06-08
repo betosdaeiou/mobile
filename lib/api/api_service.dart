@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../config/config.dart';
+import '../db/database_helper.dart';
+import '../models/incidente_local.dart';
 class ApiService {
-  static const String baseUrl = 'http://jvqy3e0tujy89or5hhad84xe.67.205.132.14.sslip.io';
+  static String get baseUrl => Config.apiUrl;
 
   static Future<Map<String, dynamic>> registerConductor(Map<String, dynamic> data) async {
     final response = await http.post(
@@ -31,21 +34,58 @@ class ApiService {
 
     if (response.statusCode == 200) {
       final body = jsonDecode(response.body);
+      
+      // Si el backend pide selección de tenant (usuario multi-tenant)
+      if (body['requires_tenant_selection'] == true) {
+        final tenants = body['tenants'] as List;
+        // Buscar el primer tenant donde sea Conductor o Mecanico
+        final targetTenant = tenants.firstWhere(
+          (t) => t['rol'] == 'Conductor' || t['rol'] == 'Mecanico', 
+          orElse: () => null
+        );
+
+        if (targetTenant == null) {
+          throw Exception('Acceso Denegado. Solo Conductores o Mecánicos pueden usar esta App.');
+        }
+
+        // Hacer la petición de select-tenant
+        final tempToken = body['temp_token'];
+        final selectResponse = await http.post(
+          Uri.parse('$baseUrl/auth/select-tenant'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'temp_token': tempToken,
+            'tenant_id': targetTenant['id']
+          }),
+        );
+
+        if (selectResponse.statusCode == 200) {
+          final selectBody = jsonDecode(selectResponse.body);
+          return _guardarSesion(selectBody['access_token'], selectBody['role']);
+        } else {
+          throw Exception('Error al verificar la organización del conductor.');
+        }
+      }
+
+      // Si es un login directo (1 solo tenant o conductor global)
       final token = body['access_token'];
       final role = body['role'];
       
-      // Bloquear cualquier ingreso que no sea conductor
-      if (role != 'Conductor') {
-         throw Exception('Acceso Denegado. Solo Conductores pueden usar esta App.');
+      if (role != 'Conductor' && role != 'Mecanico') {
+         throw Exception('Acceso Denegado. Solo Conductores o Mecánicos pueden usar esta App.');
       }
       
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('token', token);
-      await prefs.setString('role', role);
-      return token;
+      return _guardarSesion(token, role);
     } else {
       throw Exception(jsonDecode(response.body)['detail'] ?? 'Error de credenciales');
     }
+  }
+
+  static Future<String> _guardarSesion(String token, String role) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('token', token);
+    await prefs.setString('role', role);
+    return token;
   }
 
   static Future<void> logout() async {
@@ -57,6 +97,11 @@ class ApiService {
   static Future<bool> isLoggedIn() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.containsKey('token');
+  }
+
+  static Future<String?> getRole() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('role');
   }
 
   // --- Endpoints de Vehículos ---
@@ -110,19 +155,59 @@ class ApiService {
     
     if (token == null) throw Exception('No autenticado');
 
-    final response = await http.post(
-      Uri.parse('$baseUrl/incidentes/reportar'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      },
-      body: jsonEncode(data),
-    );
+    // Comprobar conectividad
+    final connectivityResult = await (Connectivity().checkConnectivity());
+    bool isOnline = connectivityResult.contains(ConnectivityResult.mobile) || 
+                    connectivityResult.contains(ConnectivityResult.wifi) || 
+                    connectivityResult.contains(ConnectivityResult.ethernet);
 
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    } else {
-      throw Exception(jsonDecode(response.body)['detail'] ?? 'Error al reportar incidente');
+    if (!isOnline) {
+      // Guardar localmente
+      final localIncidente = IncidenteLocal(
+        coordenadagps: data['coordenadagps'],
+        descripcion: data['descripcion'],
+        fecha: DateTime.now().toIso8601String(),
+        estado: 'PENDIENTE',
+        isSynced: false,
+      );
+      final saved = await DatabaseHelper.instance.create(localIncidente);
+      return {
+        'mensaje': 'Sin conexión. Incidente guardado localmente.',
+        'id': saved.id,
+        'estado': 'PENDIENTE (Offline)'
+      };
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/incidentes/reportar'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode(data),
+      );
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception(jsonDecode(response.body)['detail'] ?? 'Error al reportar incidente');
+      }
+    } catch (e) {
+      // Si falla la petición (ej. no hay internet a pesar de que Connectivity dijo que sí), guardamos local
+      final localIncidente = IncidenteLocal(
+        coordenadagps: data['coordenadagps'],
+        descripcion: data['descripcion'],
+        fecha: DateTime.now().toIso8601String(),
+        estado: 'PENDIENTE',
+        isSynced: false,
+      );
+      final saved = await DatabaseHelper.instance.create(localIncidente);
+      return {
+        'mensaje': 'Fallo de red. Incidente guardado localmente.',
+        'id': saved.id,
+        'estado': 'PENDIENTE (Offline)'
+      };
     }
   }
 
@@ -476,4 +561,38 @@ class ApiService {
       throw Exception(jsonDecode(response.body)['detail'] ?? 'Error al enviar mensaje');
     }
   }
+
+  static Future<List<dynamic>> getMantenimientosTaller() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('access_token');
+    final response = await http.get(
+      Uri.parse('$baseUrl/incidentes/mantenimientos'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Error al obtener mantenimientos');
+    }
+  }
+
+  static Future<void> actualizarEstadoIncidente(int incidenteId, String nuevoEstado) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('access_token');
+    final response = await http.patch(
+      Uri.parse('$baseUrl/incidentes/$incidenteId/estado'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json'
+      },
+      body: jsonEncode({'nuevo_estado': nuevoEstado}),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Error al actualizar estado');
+    }
+  }
+
+
 }

@@ -1,13 +1,19 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 
 import '../api/api_service.dart';
+import '../config/theme.dart';
+import '../services/websocket_service.dart';
+import '../services/connectivity_service.dart';
+import '../db/database_helper.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'login_screen.dart';
 import 'registrar_vehiculo_screen.dart';
 import 'reportar_incidente_screen.dart';
-import 'estado_incidente_screen.dart';
 import 'historial_incidentes_screen.dart';
 import 'notifications_screen.dart';
 import 'profile_screen.dart';
@@ -22,24 +28,115 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   LatLng? _currentLocation;
   final MapController _mapController = MapController();
   bool _isLoadingGps = true;
+  StreamSubscription<Position>? _positionStreamSubscription;
+  final WebSocketService _webSocketService = WebSocketService();
+  
+  // Offline support
+  final ConnectivityService _connectivityService = ConnectivityService();
+  StreamSubscription<bool>? _connectivitySubscription;
+  bool _isOnline = true;
+  int _pendingCount = 0;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _vehiculosFuture = ApiService.getVehiculos();
+    _vehiculosFuture = _loadVehiculos();
     _initMap();
+    _initWebSocket();
+    _initConnectivity();
+    _updatePendingCount();
+  }
+
+  Future<List<dynamic>> _loadVehiculos() async {
+    try {
+      final vehiculos = await ApiService.getVehiculos();
+      // Cachear en SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('cached_vehiculos', jsonEncode(vehiculos));
+      return vehiculos;
+    } catch (e) {
+      // Si falla (offline), cargar del cache
+      final prefs = await SharedPreferences.getInstance();
+      final cached = prefs.getString('cached_vehiculos');
+      if (cached != null) {
+        return List<dynamic>.from(jsonDecode(cached));
+      }
+      return [];
+    }
+  }
+
+  void _initConnectivity() {
+    _isOnline = _connectivityService.isOnline;
+    _connectivitySubscription = _connectivityService.connectionStatusStream.listen((isOnline) {
+      if (mounted) {
+        setState(() => _isOnline = isOnline);
+        if (isOnline) {
+          _updatePendingCount();
+        }
+      }
+    });
+  }
+
+  Future<void> _updatePendingCount() async {
+    final count = await DatabaseHelper.instance.countUnsyncedIncidentes();
+    if (mounted) {
+      setState(() => _pendingCount = count);
+    }
+  }
+
+  Future<void> _initWebSocket() async {
+    try {
+      final profile = await ApiService.getProfile();
+      final userId = profile['Id'];
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token') ?? '';
+      
+      _webSocketService.connect(0, 'conductor_$userId', token);
+      
+      _webSocketService.onMessageReceived = (message) {
+        if (!mounted) return;
+        final action = message['action'];
+        String msg = "Notificación recibida";
+        if (action == 'nueva_cotizacion') {
+           msg = "¡Un taller ha ofrecido una cotización!";
+        } else if (action == 'incidente_aceptado') {
+           msg = "Su incidente ha sido aceptado por el taller.";
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.notifications_active, color: Colors.white),
+                const SizedBox(width: 8),
+                Expanded(child: Text(msg)),
+              ],
+            ),
+            backgroundColor: const Color(0xFF4F46E5),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            margin: const EdgeInsets.all(16),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      };
+    } catch (e) {
+      print("Error al conectar WS: $e");
+    }
   }
 
   @override
   void dispose() {
+    _positionStreamSubscription?.cancel();
+    _connectivitySubscription?.cancel();
+    _connectivityService.dispose();
+    _webSocketService.disconnect();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Reintenta obtener ubicación cuando el usuario regresa de Configuración
     if (state == AppLifecycleState.resumed && _currentLocation == null) {
       _initMap();
     }
@@ -49,7 +146,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() => _isLoadingGps = true);
 
-    // 1. Verificar si el servicio de GPS está activo
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       if (!mounted) return;
@@ -58,7 +154,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
 
-    // 2. Verificar / solicitar permiso
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -75,7 +170,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
 
-    // 3. Obtener la posición
     try {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
@@ -88,8 +182,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
       _mapController.move(_currentLocation!, 15.0);
     } catch (e) {
-      if (mounted) setState(() => _isLoadingGps = false);
+      if (mounted) setState(() {
+        // Fallback a La Paz si el emulador falla en dar ubicación
+        _currentLocation = const LatLng(-16.5, -68.15); 
+        _isLoadingGps = false;
+      });
+      _mapController.move(const LatLng(-16.5, -68.15), 15.0);
     }
+
+    // Iniciar escucha del GPS en tiempo real
+    _positionStreamSubscription?.cancel();
+    _positionStreamSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5, // actualiza si se mueve 5 metros
+      ),
+    ).listen((Position position) {
+      if (mounted) {
+        setState(() {
+          _currentLocation = LatLng(position.latitude, position.longitude);
+        });
+        _mapController.move(_currentLocation!, _mapController.camera.zoom);
+      }
+    });
   }
 
   void _showLocationServiceDialog() {
@@ -97,31 +212,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
             Icon(Icons.location_off, color: Colors.orange),
             SizedBox(width: 8),
-            Text('GPS Desactivado'),
+            Text('GPS Desactivado', style: TextStyle(color: AppTheme.gray900)),
           ],
         ),
         content: const Text(
           'Los servicios de ubicación están deshabilitados.\n\n'
           'Para poder usar el mapa y reportar incidentes, activa el GPS en la configuración de tu dispositivo.',
+          style: TextStyle(color: AppTheme.gray700),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar'),
+            child: const Text('Cancelar', style: TextStyle(color: AppTheme.gray500)),
           ),
           ElevatedButton.icon(
             icon: const Icon(Icons.settings, size: 16),
             label: const Text('Abrir Ajustes'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.indigo,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
             onPressed: () {
               Navigator.pop(ctx);
               Geolocator.openLocationSettings();
@@ -136,31 +248,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
-            Icon(Icons.location_disabled, color: Colors.red),
+            Icon(Icons.location_disabled, color: AppTheme.red500),
             SizedBox(width: 8),
-            Text('Permiso Denegado'),
+            Text('Permiso Denegado', style: TextStyle(color: AppTheme.gray900)),
           ],
         ),
         content: const Text(
           'El permiso de ubicación fue denegado permanentemente.\n\n'
           'Ve a Configuración → Aplicaciones → esta app → Permisos → Ubicación y actívalo.',
+          style: TextStyle(color: AppTheme.gray700),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar'),
+            child: const Text('Cancelar', style: TextStyle(color: AppTheme.gray500)),
           ),
           ElevatedButton.icon(
             icon: const Icon(Icons.settings, size: 16),
             label: const Text('Abrir Ajustes'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.indigo,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
             onPressed: () {
               Navigator.pop(ctx);
               Geolocator.openAppSettings();
@@ -171,17 +280,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-
   void _refreshList() {
     setState(() {
-      _vehiculosFuture = ApiService.getVehiculos();
+      _vehiculosFuture = _loadVehiculos();
     });
+    _updatePendingCount();
   }
 
   void _mostrarMisVehiculos() async {
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (context) {
         return FutureBuilder<List<dynamic>>(
           future: _vehiculosFuture,
@@ -195,21 +305,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             return Column(
               children: [
                 Padding(
-                  padding: const EdgeInsets.all(16.0),
+                  padding: const EdgeInsets.all(24.0),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Mi Garaje', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      const Text('Mi Garaje', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppTheme.gray900, letterSpacing: -0.5)),
                       IconButton(
-                        icon: const Icon(Icons.add_circle, color: Colors.indigo, size: 30),
+                        icon: const Icon(Icons.add_circle, color: AppTheme.blue600, size: 32),
                         onPressed: () async {
-                          Navigator.pop(context); // Cierra el modal temporalmente
+                          Navigator.pop(context);
                           final result = await Navigator.push(
                             context,
                             MaterialPageRoute(builder: (context) => RegistrarVehiculoScreen()),
                           );
                           if (result == true) _refreshList();
-                          if (mounted) _mostrarMisVehiculos(); // Lo reabre
+                          if (mounted) _mostrarMisVehiculos();
                         },
                       )
                     ],
@@ -217,15 +327,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
                 Expanded(
                   child: vehiculos.isEmpty
-                      ? const Center(child: Text("No tienes vehículos registrados"))
-                      : ListView.builder(
+                      ? const Center(child: Text("No tienes vehículos registrados", style: TextStyle(color: AppTheme.gray500)))
+                      : ListView.separated(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
                           itemCount: vehiculos.length,
+                          separatorBuilder: (context, index) => const Divider(height: 1, color: AppTheme.gray100),
                           itemBuilder: (context, index) {
                             final vehiculo = vehiculos[index];
                             return ListTile(
-                              leading: const Icon(Icons.directions_car, color: Colors.indigo),
-                              title: Text('${vehiculo['Marca']} ${vehiculo['Modelo']}'),
-                              subtitle: Text('Placa: ${vehiculo['Placa']}'),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              leading: Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: AppTheme.blue50,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: const Icon(Icons.directions_car, color: AppTheme.blue600),
+                              ),
+                              title: Text('${vehiculo['Marca']} ${vehiculo['Modelo']}', style: const TextStyle(fontWeight: FontWeight.w600, color: AppTheme.gray900)),
+                              subtitle: Text('Placa: ${vehiculo['Placa']}', style: const TextStyle(color: AppTheme.gray500)),
                             );
                           },
                         ),
@@ -252,25 +372,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: const Text('Rastreo Activo', style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold)),
-        backgroundColor: Colors.white.withOpacity(0.9),
+        title: const Text('Rastreo Activo', style: TextStyle(color: AppTheme.gray900, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
+        backgroundColor: Colors.white.withOpacity(0.85),
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         actions: [
           IconButton(
-            icon: const Icon(Icons.person, color: Color(0xFF4F46E5)),
+            icon: const Icon(Icons.person_outline, color: AppTheme.gray700),
             tooltip: 'Mi Perfil',
             onPressed: () {
               Navigator.push(context, MaterialPageRoute(builder: (context) => const ProfileScreen()));
             },
           ),
           IconButton(
-            icon: const Icon(Icons.notifications, color: Colors.indigo),
+            icon: const Icon(Icons.notifications_none, color: AppTheme.gray700),
             onPressed: () {
               Navigator.push(context, MaterialPageRoute(builder: (context) => const NotificationsScreen()));
             },
           ),
           IconButton(
-            icon: const Icon(Icons.logout, color: Colors.black87),
+            icon: const Icon(Icons.logout, color: AppTheme.gray700),
             onPressed: () async {
               await ApiService.logout();
               if (mounted) {
@@ -282,11 +403,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
       body: Stack(
         children: [
-          // 1. CAPA DE MAPA DE FONDO
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
-              initialCenter: _currentLocation ?? const LatLng(-17.7833, -63.1821), // Centro por defecto asumiendo Santa Cruz
+              initialCenter: _currentLocation ?? const LatLng(-17.7833, -63.1821),
               initialZoom: 14.0,
             ),
             children: [
@@ -301,10 +421,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       point: _currentLocation!,
                       width: 80,
                       height: 80,
-                      child: const Icon(
-                        Icons.local_taxi, // Auto icono
-                        color: Colors.indigo,
-                        size: 45,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AppTheme.blue600.withOpacity(0.2),
+                        ),
+                        child: const Center(
+                          child: Icon(
+                            Icons.directions_car,
+                            color: AppTheme.blue600,
+                            size: 40,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -312,43 +440,101 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ],
           ),
 
-          // 2. CAPA INFORMATIVA O DE CARGA DEL GPS
           if (_isLoadingGps)
             Positioned(
               top: 100,
               left: 20,
               right: 20,
               child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)]),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white, 
+                  borderRadius: BorderRadius.circular(16), 
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, spreadRadius: 1)
+                  ]
+                ),
                 child: const Row(
                   children: [
-                    CircularProgressIndicator(),
+                    SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
                     SizedBox(width: 16),
-                    Text("Buscando tu ubicación...", style: TextStyle(fontWeight: FontWeight.bold))
+                    Text("Buscando tu ubicación...", style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.gray900))
                   ],
                 ),
               ),
             ),
           
-          // 3. CAPA DE INTERFACES UBER FLOTANTES
+          // ─── OFFLINE BANNER ───
+          if (!_isOnline)
+            Positioned(
+              top: 100,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.orange.shade700, Colors.orange.shade600],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(color: Colors.orange.withOpacity(0.3), blurRadius: 12, offset: const Offset(0, 4))
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.cloud_off, color: Colors.white, size: 22),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Modo Offline',
+                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14),
+                          ),
+                          Text(
+                            _pendingCount > 0
+                                ? '$_pendingCount reporte(s) pendiente(s) de envío'
+                                : 'Puedes reportar emergencias sin internet',
+                            style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_pendingCount > 0)
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          '$_pendingCount',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          
           Align(
             alignment: Alignment.bottomCenter,
             child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: const BoxDecoration(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-                boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10, spreadRadius: 2)],
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 20, offset: const Offset(0, -5))],
               ),
               child: SafeArea(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Boton S.O.S Gigante
                     SizedBox(
                       width: double.infinity,
-                      height: 55,
+                      height: 56,
                       child: ElevatedButton.icon(
                         onPressed: () async {
                           final vehiculos = await _vehiculosFuture;
@@ -358,59 +544,62 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               MaterialPageRoute(
                                 builder: (context) => ReportarIncidenteScreen(
                                   vehiculosRegistrados: vehiculos,
-                                  gpsReal: _currentLocation, // <-- PASAMOS EL MAPA REAL
+                                  gpsReal: _currentLocation,
                                 ),
                               ),
                             );
                             if (result == true) _refreshList();
                           }
                         },
-                        icon: const Icon(Icons.warning_amber_rounded, size: 28),
-                        label: const Text('S.O.S EMERGENCIA', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        icon: const Icon(Icons.warning_amber_rounded, size: 24),
+                        label: const Text('S.O.S EMERGENCIA', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red[800],
+                          backgroundColor: AppTheme.red500,
                           foregroundColor: Colors.white,
+                          elevation: 0,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    // Mis vehículos panel
+                    const SizedBox(height: 16),
                     Row(
                       children: [
                         Expanded(
                           child: OutlinedButton.icon(
                             onPressed: _mostrarMisVehiculos,
-                            icon: const Icon(Icons.garage),
+                            icon: const Icon(Icons.garage, size: 20),
                             label: const Text('Mi Garaje'),
                             style: OutlinedButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(vertical: 14),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              side: const BorderSide(color: AppTheme.gray200),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 12),
                         Expanded(
                           child: OutlinedButton.icon(
                             onPressed: _abrirHistorial,
-                            icon: const Icon(Icons.assignment, color: Colors.orange),
-                            label: const Text('Mis Solicitudes'),
+                            icon: const Icon(Icons.assignment_outlined, size: 20),
+                            label: const Text('Solicitudes'),
                             style: OutlinedButton.styleFrom(
-                                foregroundColor: Colors.orange[800],
-                                padding: const EdgeInsets.symmetric(vertical: 14),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                side: BorderSide(color: Colors.orange.withOpacity(0.5))),
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              side: const BorderSide(color: AppTheme.gray200),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 12),
                         FloatingActionButton(
                           mini: true,
-                          backgroundColor: Colors.indigo,
-                          child: const Icon(Icons.my_location, color: Colors.white),
+                          elevation: 0,
+                          backgroundColor: AppTheme.blue50,
+                          child: const Icon(Icons.my_location, color: AppTheme.blue600),
                           onPressed: () {
                             if (_currentLocation != null) {
                               _mapController.move(_currentLocation!, 16.0);
                             } else {
-                              _initMap(); // reintenta
+                              _initMap();
                             }
                           },
                         )

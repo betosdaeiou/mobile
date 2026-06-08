@@ -7,6 +7,10 @@ import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../api/api_service.dart';
+import '../config/theme.dart';
+import '../services/connectivity_service.dart';
+import '../db/database_helper.dart';
+import '../models/incidente_local.dart';
 import 'estado_incidente_screen.dart';
 
 class ReportarIncidenteScreen extends StatefulWidget {
@@ -38,8 +42,8 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
   Future<void> _tomarFoto() async {
     if (_imagenes.length >= _maxImagenes) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Máximo $_maxImagenes imágenes permitidas'),
+        const SnackBar(
+          content: Text('Máximo 10 imágenes permitidas'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -64,8 +68,8 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
     final espacioDisponible = _maxImagenes - _imagenes.length;
     if (espacioDisponible <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Máximo $_maxImagenes imágenes permitidas'),
+        const SnackBar(
+          content: Text('Máximo 10 imágenes permitidas'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -87,7 +91,7 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
       if (fotos.length > espacioDisponible) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Solo se agregaron $espacioDisponible de ${fotos.length} imágenes (límite: $_maxImagenes)'),
+            content: Text('Solo se agregaron $espacioDisponible de ${fotos.length} imágenes'),
             backgroundColor: Colors.orange,
           ),
         );
@@ -136,11 +140,9 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
       final bytes = img.readAsBytesSync();
       base64List.add(base64Encode(bytes));
     }
-    // Separamos con ||| para poder reconstruirlas en el backend
     return base64List.join('|||');
   }
 
-  // --- AUDIO RECORDING METHODS ---
   Future<void> _startRecording() async {
     try {
       if (await _audioRecorder.hasPermission()) {
@@ -183,6 +185,45 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
     });
   }
 
+  Future<void> _guardarOffline(String coordenadas, String fotosEncoded) async {
+    final dbHelper = DatabaseHelper.instance;
+    await dbHelper.create(IncidenteLocal(
+      coordenadagps: coordenadas,
+      descripcion: _descripcionController.text.trim(),
+      fecha: DateTime.now().toIso8601String(),
+      estado: "Pendiente de Sincronización",
+      isSynced: false,
+      vehiculoId: _vehiculoSeleccionadoId,
+      fotosBase64: fotosEncoded.isNotEmpty ? fotosEncoded : null,
+      audioBase64: _audioBase64.isNotEmpty ? _audioBase64 : null,
+    ));
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: const [
+              Icon(Icons.cloud_off, color: Colors.white, size: 20),
+              SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Sin conexión. Reporte guardado localmente.\nSe enviará automáticamente al recuperar internet.',
+                  style: TextStyle(fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+          duration: const Duration(seconds: 5),
+          backgroundColor: Colors.orange.shade700,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
+        ),
+      );
+      Navigator.pop(context);
+    }
+  }
+
   Future<void> _submitIncidente() async {
     if (_vehiculoSeleccionadoId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -208,29 +249,47 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
           }
         };
 
-        final resultado = await ApiService.reportarIncidente(payload);
+        final connectivity = ConnectivityService();
+        await connectivity.checkInitialConnection();
         
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) => EstadoIncidenteScreen(
-                incidente: resultado,
-                gpsReal: widget.gpsReal,
-              ),
-            ),
+        if (connectivity.isOnline) {
+          try {
+            final resultado = await ApiService.reportarIncidente(payload);
+            if (mounted) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => EstadoIncidenteScreen(
+                    incidente: resultado,
+                    gpsReal: widget.gpsReal,
+                  ),
+                ),
+              );
+            }
+          } catch (networkError) {
+            // Si falla la red aunque Connectivity dijo online, guardar offline
+            await _guardarOffline(
+              payload['coordenadagps'] as String,
+              fotosEncoded,
+            );
+          }
+        } else {
+          await _guardarOffline(
+            payload['coordenadagps'] as String,
+            fotosEncoded,
           );
         }
       } catch (e) {
         showDialog(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Error al reportar'),
-            content: Text(e.toString()),
+            backgroundColor: Colors.white,
+            title: const Text('Error al reportar', style: TextStyle(color: AppTheme.gray900)),
+            content: Text(e.toString(), style: const TextStyle(color: AppTheme.gray700)),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('OK'),
+                child: const Text('OK', style: TextStyle(color: AppTheme.blue600)),
               )
             ],
           ),
@@ -244,48 +303,51 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
   void _mostrarOpcionesImagen() {
     showModalBottomSheet(
       context: context,
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (ctx) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                width: 40,
+                width: 48,
                 height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
+                margin: const EdgeInsets.only(bottom: 24),
                 decoration: BoxDecoration(
-                  color: Colors.grey[300],
+                  color: AppTheme.gray200,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              Text(
+              const Text(
                 'Agregar Evidencia Fotográfica',
                 style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.grey[800],
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: AppTheme.gray900,
+                  letterSpacing: -0.5,
                 ),
               ),
+              const SizedBox(height: 4),
               Text(
                 '${_imagenes.length}/$_maxImagenes imágenes',
-                style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+                style: const TextStyle(fontSize: 14, color: AppTheme.gray500),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 24),
               ListTile(
                 leading: Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.blue.withOpacity(0.1),
+                    color: AppTheme.blue50,
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.camera_alt, color: Colors.blue, size: 26),
+                  child: const Icon(Icons.camera_alt_outlined, color: AppTheme.blue600, size: 24),
                 ),
-                title: const Text('Tomar Foto', style: TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: const Text('Usar la cámara del dispositivo'),
+                title: const Text('Tomar Foto', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.gray900)),
+                subtitle: const Text('Usar la cámara del dispositivo', style: TextStyle(color: AppTheme.gray500)),
                 onTap: () {
                   Navigator.pop(ctx);
                   _tomarFoto();
@@ -293,15 +355,15 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
               ),
               ListTile(
                 leading: Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: Colors.green.withOpacity(0.1),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.photo_library, color: Colors.green, size: 26),
+                  child: const Icon(Icons.photo_library_outlined, color: Colors.green, size: 24),
                 ),
-                title: const Text('Elegir de Galería', style: TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: const Text('Seleccionar múltiples imágenes'),
+                title: const Text('Elegir de Galería', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.gray900)),
+                subtitle: const Text('Seleccionar múltiples imágenes', style: TextStyle(color: AppTheme.gray500)),
                 onTap: () {
                   Navigator.pop(ctx);
                   _seleccionarGaleria();
@@ -323,19 +385,18 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Si no hay vehículos, no se puede reportar un accidente asociado a uno
     if (widget.vehiculosRegistrados.isEmpty) {
       return Scaffold(
-        appBar: AppBar(backgroundColor: Colors.red[900], title: const Text('Reportar Emergencia')),
+        appBar: AppBar(
+          title: const Text('Reportar Emergencia'),
+        ),
         body: const Center(child: Text("Debes registrar al menos un vehículo antes de reportar.")),
       );
     }
 
     return Scaffold(
         appBar: AppBar(
-          title: const Text('Reportar Emergencia', style: TextStyle(color: Colors.white)),
-          backgroundColor: Colors.red[900],
-          iconTheme: const IconThemeData(color: Colors.white),
+          title: const Text('Reportar Emergencia', style: TextStyle(color: AppTheme.red600, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
         ),
         body: SingleChildScrollView(
             child: Padding(
@@ -345,21 +406,30 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Icon(Icons.warning_rounded, color: Colors.orange, size: 80),
-                const SizedBox(height: 16),
-                const Text(
-                  'Mantén la calma.\nNuestros mecánicos estarán contigo pronto.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: AppTheme.red50,
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: const Column(
+                    children: [
+                      Icon(Icons.warning_amber_rounded, color: AppTheme.red500, size: 64),
+                      SizedBox(height: 16),
+                      Text(
+                        'Mantén la calma.\nNuestros mecánicos estarán contigo pronto.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppTheme.red600),
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 32),
                 
-                // --- SELECCION DE VEHICULO ---
                 DropdownButtonFormField<int>(
                   decoration: const InputDecoration(
                     labelText: 'Vehículo Afectado',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.directions_car),
+                    prefixIcon: Icon(Icons.directions_car_outlined),
                   ),
                   value: _vehiculoSeleccionadoId,
                   items: widget.vehiculosRegistrados.map((v) {
@@ -376,78 +446,73 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
                 ),
                 const SizedBox(height: 20),
 
-                // --- DESCRIPCION EVENTO ---
                 TextFormField(
                   controller: _descripcionController,
                   decoration: const InputDecoration(
                     labelText: '¿Qué sucedió? (Descripción)',
-                    border: OutlineInputBorder(),
                     alignLabelWithHint: true,
                   ),
                   maxLines: 4,
                   validator: (v) => v!.isEmpty ? 'Por favor ingresa una descripción' : null,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 24),
 
-                // --- EVIDENCIA FOTOGRÁFICA ---
                 Container(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
-                    color: Colors.grey[50],
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey[300]!),
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppTheme.gray200),
+                    boxShadow: [
+                      BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10, offset: const Offset(0, 4))
+                    ]
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
                         children: [
-                          const Icon(Icons.photo_camera, color: Colors.indigo, size: 22),
-                          const SizedBox(width: 8),
-                          const Text('Evidencia Fotográfica',
-                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          const Icon(Icons.photo_camera_outlined, color: AppTheme.blue600, size: 24),
+                          const SizedBox(width: 12),
+                          const Text('Evidencia Fotográfica', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppTheme.gray900)),
                           const Spacer(),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
-                              color: _imagenes.length >= _maxImagenes
-                                  ? Colors.red.withOpacity(0.1)
-                                  : Colors.indigo.withOpacity(0.1),
+                              color: _imagenes.length >= _maxImagenes ? AppTheme.red50 : AppTheme.blue50,
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
                               '${_imagenes.length}/$_maxImagenes',
                               style: TextStyle(
-                                color: _imagenes.length >= _maxImagenes ? Colors.red : Colors.indigo,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                                color: _imagenes.length >= _maxImagenes ? AppTheme.red600 : AppTheme.blue600,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
                               ),
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 16),
 
-                      // Grid de imágenes
                       if (_imagenes.isNotEmpty) ...[
                         GridView.builder(
                           shrinkWrap: true,
                           physics: const NeverScrollableScrollPhysics(),
                           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                             crossAxisCount: 3,
-                            crossAxisSpacing: 8,
-                            mainAxisSpacing: 8,
+                            crossAxisSpacing: 12,
+                            mainAxisSpacing: 12,
                           ),
                           itemCount: _imagenes.length,
                           itemBuilder: (ctx, index) {
                             return Stack(
                               children: [
-                                // Thumbnail
                                 GestureDetector(
                                   onTap: () => _verImagenCompleta(_imagenes[index]),
                                   child: Container(
                                     decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(10),
+                                      borderRadius: BorderRadius.circular(12),
                                       image: DecorationImage(
                                         image: FileImage(_imagenes[index]),
                                         fit: BoxFit.cover,
@@ -455,59 +520,31 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
                                     ),
                                   ),
                                 ),
-                                // Delete button
                                 Positioned(
-                                  top: 4,
-                                  right: 4,
-                                  child: GestureDetector(
-                                    onTap: () => _eliminarImagen(index),
-                                    child: Container(
+                                  top: -4,
+                                  right: -4,
+                                  child: IconButton(
+                                    icon: Container(
                                       padding: const EdgeInsets.all(4),
-                                      decoration: const BoxDecoration(
-                                        color: Colors.red,
-                                        shape: BoxShape.circle,
-                                      ),
+                                      decoration: const BoxDecoration(color: AppTheme.red500, shape: BoxShape.circle),
                                       child: const Icon(Icons.close, color: Colors.white, size: 14),
                                     ),
-                                  ),
-                                ),
-                                // Index badge
-                                Positioned(
-                                  bottom: 4,
-                                  left: 4,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black54,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Text(
-                                      '${index + 1}',
-                                      style: const TextStyle(color: Colors.white, fontSize: 11),
-                                    ),
+                                    onPressed: () => _eliminarImagen(index),
                                   ),
                                 ),
                               ],
                             );
                           },
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 16),
                       ],
 
-                      // Botón agregar
                       SizedBox(
                         width: double.infinity,
                         child: OutlinedButton.icon(
                           onPressed: _imagenes.length >= _maxImagenes ? null : _mostrarOpcionesImagen,
-                          icon: const Icon(Icons.add_a_photo),
-                          label: Text(_imagenes.isEmpty
-                              ? 'Agregar Fotos del Incidente'
-                              : 'Agregar Más Fotos'),
-                          style: OutlinedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                            side: BorderSide(color: Colors.indigo.withOpacity(0.5)),
-                          ),
+                          icon: const Icon(Icons.add_a_photo_outlined),
+                          label: Text(_imagenes.isEmpty ? 'Agregar Fotos' : 'Agregar Más Fotos'),
                         ),
                       ),
                     ],
@@ -515,81 +552,85 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
                 ),
                 const SizedBox(height: 16),
 
-                // --- EVIDENCIA DE AUDIO ---
                 Container(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.02),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.red.withOpacity(0.1)),
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppTheme.gray200),
+                    boxShadow: [
+                      BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10, offset: const Offset(0, 4))
+                    ]
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Row(
                         children: [
-                          Icon(Icons.mic, color: Colors.red, size: 22),
-                          SizedBox(width: 8),
-                          Text('Descripción por Voz (Audio)',
-                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          Icon(Icons.mic_none_outlined, color: AppTheme.red500, size: 24),
+                          SizedBox(width: 12),
+                          Text('Descripción por Voz', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppTheme.gray900)),
                         ],
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 16),
                       if (_audioPath == null && !_isRecording)
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton.icon(
                             onPressed: _startRecording,
-                            icon: const Icon(Icons.mic),
+                            icon: const Icon(Icons.mic_none_outlined),
                             label: const Text('Grabar Explicación'),
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red[50],
-                              foregroundColor: Colors.red[700],
+                              backgroundColor: AppTheme.red50,
+                              foregroundColor: AppTheme.red600,
                               elevation: 0,
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                             ),
                           ),
                         )
                       else if (_isRecording)
                         Container(
-                          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
                           decoration: BoxDecoration(
-                            color: Colors.red[100],
-                            borderRadius: BorderRadius.circular(10),
+                            color: AppTheme.red50,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.red[200]!),
                           ),
                           child: Row(
                             children: [
-                              const Icon(Icons.circle, color: Colors.red, size: 12),
+                              const Icon(Icons.fiber_manual_record, color: AppTheme.red500, size: 16),
                               const SizedBox(width: 12),
                               const Expanded(
-                                child: Text('Grabando audio...', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                                child: Text('Grabando audio...', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.red600)),
                               ),
-                              IconButton(
-                                icon: const Icon(Icons.stop, color: Colors.red),
-                                onPressed: _stopRecording,
+                              GestureDetector(
+                                onTap: _stopRecording,
+                                child: Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(color: Colors.red[100], borderRadius: BorderRadius.circular(8)),
+                                  child: const Icon(Icons.stop, color: AppTheme.red600, size: 20),
+                                ),
                               ),
                             ],
                           ),
                         )
                       else
                         Container(
-                          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
                           decoration: BoxDecoration(
-                            color: Colors.green[50],
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.green[100]!),
+                            color: Colors.green.withOpacity(0.05),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.green.withOpacity(0.2)),
                           ),
                           child: Row(
                             children: [
-                              const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                              const Icon(Icons.check_circle_outline, color: Colors.green, size: 24),
                               const SizedBox(width: 12),
                               const Expanded(
-                                child: Text('Audio Capturado', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                                child: Text('Audio Capturado', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.green)),
                               ),
-                              IconButton(
-                                icon: const Icon(Icons.delete_outline, color: Colors.red),
-                                onPressed: _eliminarAudio,
+                              GestureDetector(
+                                onTap: _eliminarAudio,
+                                child: const Icon(Icons.delete_outline, color: AppTheme.red500, size: 24),
                               ),
                             ],
                           ),
@@ -599,29 +640,27 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
                 ),
                 const SizedBox(height: 16),
 
-                // --- GPS INFO ---
                 Container(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.blue.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.blue.withOpacity(0.2)),
+                    color: AppTheme.blue50,
+                    borderRadius: BorderRadius.circular(16),
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.location_on, color: Colors.blue, size: 22),
-                      const SizedBox(width: 10),
+                      const Icon(Icons.location_on_outlined, color: AppTheme.blue600, size: 24),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('Ubicación GPS', 
-                                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                            const Text('Ubicación GPS', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppTheme.gray900)),
+                            const SizedBox(height: 2),
                             Text(
                               widget.gpsReal != null
                                   ? '${widget.gpsReal!.latitude.toStringAsFixed(5)}, ${widget.gpsReal!.longitude.toStringAsFixed(5)}'
                                   : 'Capturando ubicación...',
-                              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                              style: const TextStyle(fontSize: 13, color: AppTheme.gray600),
                             ),
                           ],
                         ),
@@ -629,27 +668,25 @@ class _ReportarIncidenteScreenState extends State<ReportarIncidenteScreen> {
                       Icon(
                         widget.gpsReal != null ? Icons.check_circle : Icons.sync,
                         color: widget.gpsReal != null ? Colors.green : Colors.orange,
-                        size: 20,
+                        size: 24,
                       ),
                     ],
                   ),
                 ),
 
-                const SizedBox(height: 24),
+                const SizedBox(height: 32),
                 
-                // --- BOTON DE SUBMIT ---
                 SizedBox(
-                  height: 60,
+                  height: 56,
                   child: ElevatedButton(
                     onPressed: _isLoading ? null : _submitIncidente,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red[800],
+                      backgroundColor: AppTheme.red600,
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
                     child: _isLoading
-                        ? const CircularProgressIndicator(color: Colors.white)
-                        : const Text('ENVIAR REPORTE (S.O.S)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                        : const Text('ENVIAR REPORTE (S.O.S)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
                   ),
                 )
               ],

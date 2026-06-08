@@ -4,6 +4,9 @@ import '../api/api_service.dart';
 import '../services/fcm_service.dart';
 import 'estado_incidente_screen.dart';
 import 'package:latlong2/latlong.dart';
+import '../config/theme.dart';
+import '../db/database_helper.dart';
+import '../models/incidente_local.dart';
 
 class HistorialIncidentesScreen extends StatefulWidget {
   final LatLng? gpsReal;
@@ -24,6 +27,7 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
 
   final List<String> _estados = [
     'Todos',
+    'Pendiente',
     'Reportado',
     'Asignado',
     'En Camino',
@@ -34,7 +38,7 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
   @override
   void initState() {
     super.initState();
-    _incidentesFuture = ApiService.getMisIncidentes();
+    _incidentesFuture = _loadAllIncidentes();
     
     _fcmSubscription = FcmService.onRefresh.listen((_) {
       _refresh();
@@ -49,8 +53,31 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
 
   void _refresh() {
     setState(() {
-      _incidentesFuture = ApiService.getMisIncidentes();
+      _incidentesFuture = _loadAllIncidentes();
     });
+  }
+
+  Future<List<dynamic>> _loadAllIncidentes() async {
+    List<dynamic> remote = [];
+    try {
+      remote = await ApiService.getMisIncidentes();
+    } catch (e) {
+      print('No se pudo cargar de la API (Offline): $e');
+    }
+
+    final dbHelper = DatabaseHelper.instance;
+    final locals = await dbHelper.readAllUnsyncedIncidentes();
+    
+    final List<dynamic> localAsMap = locals.map((l) => {
+      'id': l.id,
+      'estado': l.estado,
+      'fecha': l.fecha,
+      'coordenadagps': l.coordenadagps,
+      'evidencias': [{'descripcion': l.descripcion}],
+      'is_local': true,
+    }).toList();
+    
+    return [...localAsMap, ...remote];
   }
 
   Color _colorEstado(String estado) {
@@ -86,13 +113,13 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F1523),
+      backgroundColor: AppTheme.gray50,
       appBar: AppBar(
         title: const Text('Historial de Incidentes',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        backgroundColor: const Color(0xFF1A2236),
+            style: TextStyle(color: AppTheme.gray900, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
+        backgroundColor: Colors.white,
         elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
+        iconTheme: const IconThemeData(color: AppTheme.gray900),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -139,9 +166,11 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
                 final todos = snapshot.data ?? [];
                 final incidentes = _filtroEstado == 'Todos'
                     ? todos
-                    : todos
-                        .where((i) => i['estado'] == _filtroEstado)
-                        .toList();
+                    : _filtroEstado == 'Pendiente'
+                        ? todos.where((i) => i['is_local'] == true || (i['estado'] ?? '').contains('Pendiente')).toList()
+                        : todos
+                            .where((i) => i['estado'] == _filtroEstado)
+                            .toList();
 
                 if (todos.isEmpty) {
                   return _buildEmptyState();
@@ -294,6 +323,26 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
           onTap: () async {
+            if (inc['is_local'] == true) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Row(
+                    children: const [
+                      Icon(Icons.cloud_off, color: Colors.white, size: 20),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Text('Este reporte está pendiente de sincronización. Se enviará cuando haya internet.'),
+                      ),
+                    ],
+                  ),
+                  backgroundColor: Colors.orange.shade700,
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  margin: const EdgeInsets.all(16),
+                ),
+              );
+              return;
+            }
             final result = await Navigator.push(
               context,
               MaterialPageRoute(
@@ -341,15 +390,23 @@ class _HistorialIncidentesScreenState extends State<HistorialIncidentesScreen> {
                               const Icon(Icons.access_time,
                                   color: Colors.white38, size: 13),
                               const SizedBox(width: 4),
-                              Text(fecha,
-                                  style: const TextStyle(
-                                      color: Colors.white38, fontSize: 12)),
+                              Expanded(
+                                child: Text(fecha,
+                                    style: const TextStyle(
+                                        color: Colors.white38, fontSize: 12),
+                                    overflow: TextOverflow.ellipsis),
+                              ),
                             ],
                           ),
                         ],
                       ),
                     ),
                     // Estado badge
+                    if (inc['is_local'] == true)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 8),
+                        child: Icon(Icons.cloud_off, color: Colors.orange, size: 20),
+                      ),
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 6),
